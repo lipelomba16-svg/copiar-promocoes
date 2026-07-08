@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Copy Promo Standalone</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Standalone extraction</p>
+          <h1>Copy Promo</h1>
+          <p class="lede">Configure MongoDB, credenciais afiliadas, WhatsApp, partições e automações diretamente pela interface.</p>
+        </div>
+        <div class="hero-actions">
+          <button id="refreshAll">Atualizar tudo</button>
+          <span id="healthBadge" class="badge">Carregando...</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card">
+          <h2>MongoDB</h2>
+          <div class="field"><label>URI</label><textarea id="mongoUri" rows="3"></textarea></div>
+          <div class="field"><label>Database Name</label><input id="mongoDatabaseName" /></div>
+          <div class="field inline"><label><input type="checkbox" id="mongoEnabled" /> Usar Mongo snapshot</label></div>
+          <div class="actions">
+            <button data-action="test-mongo">Testar</button>
+            <button data-action="save-mongo" class="primary">Salvar Mongo</button>
+          </div>
+          <pre id="mongoStatus" class="logbox"></pre>
+        </section>
+
+        <section class="card">
+          <h2>WhatsApp</h2>
+          <div class="field"><label>Número para pareamento (opcional)</label><input id="waPhone" placeholder="5511999999999" /></div>
+          <div class="actions">
+            <button data-action="wa-connect">Conectar por QR</button>
+            <button data-action="wa-pair">Parear por número</button>
+            <button data-action="wa-refresh">Atualizar grupos</button>
+            <button data-action="wa-disconnect">Desconectar</button>
+          </div>
+          <div class="split">
+            <div>
+              <img id="waQr" alt="QR do WhatsApp" class="qr" />
+              <p id="waPairing"></p>
+            </div>
+            <div>
+              <pre id="waStatus" class="logbox"></pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="card wide">
+          <h2>Credenciais de Afiliados</h2>
+          <div class="providers">
+            <form class="provider" data-provider="shopee">
+              <h3>Shopee</h3>
+              <input name="appId" placeholder="App ID" />
+              <input name="secret" type="password" placeholder="Secret" />
+              <input name="endpoint" placeholder="Endpoint" />
+              <label><input type="checkbox" name="isActive" /> Ativo</label>
+              <div class="actions">
+                <button type="button" data-provider-test="shopee">Testar</button>
+                <button type="submit" class="primary">Salvar</button>
+              </div>
+              <pre id="provider-status-shopee" class="provider-status logbox" data-provider-status="shopee"></pre>
+            </form>
+
+            <form class="provider" data-provider="amazon">
+              <h3>Amazon</h3>
+              <input name="affiliateTag" placeholder="Affiliate Tag" />
+              <textarea name="cookies" rows="4" placeholder="Cookie SiteStripe"></textarea>
+              <label><input type="checkbox" name="isActive" /> Ativo</label>
+              <div class="actions">
+                <button type="button" data-provider-test="amazon">Testar</button>
+                <button type="submit" class="primary">Salvar</button>
+              </div>
+              <pre id="provider-status-amazon" class="provider-status logbox" data-provider-status="amazon"></pre>
+            </form>
+
+            <form class="provider" data-provider="mercadolivre">
+              <h3>Mercado Livre</h3>
+              <input name="affiliateTag" placeholder="Affiliate Tag" />
+              <textarea name="cookie" rows="3" placeholder="Cookie"></textarea>
+              <input name="csrfToken" placeholder="CSRF Token" />
+              <input name="listReplacementUrl" placeholder="URL de lista/cupom" />
+              <input name="couponAlertImageUrl" placeholder="Imagem fallback de cupom (opcional)" />
+              <input name="createLinkUrl" placeholder="createLink URL" />
+              <label><input type="checkbox" name="isActive" /> Ativo</label>
+              <div class="actions">
+                <button type="button" data-provider-test="mercadolivre">Testar</button>
+                <button type="submit" class="primary">Salvar</button>
+              </div>
+              <pre id="provider-status-mercadolivre" class="provider-status logbox" data-provider-status="mercadolivre"></pre>
+            </form>
+
+            <form class="provider" data-provider="aliexpress">
+              <h3>AliExpress</h3>
+              <input name="appKey" placeholder="App Key" />
+              <input name="appSecret" type="password" placeholder="App Secret" />
+              <input name="trackingId" placeholder="Tracking ID" />
+              <input name="endpoint" placeholder="Endpoint" />
+              <label><input type="checkbox" name="isActive" /> Ativo</label>
+              <div class="actions">
+                <button type="button" data-provider-test="aliexpress">Testar</button>
+                <button type="submit" class="primary">Salvar</button>
+              </div>
+              <pre id="provider-status-aliexpress" class="provider-status logbox" data-provider-status="aliexpress"></pre>
+            </form>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Partições de Destino</h2>
+          <form id="groupForm">
+            <input type="hidden" id="groupId" />
+            <div class="field"><label>Nome</label><input id="groupName" /></div>
+            <div class="field"><label>Destinos WhatsApp (um por linha)</label><textarea id="groupIdentifiers" rows="4"></textarea></div>
+            <div class="field inline"><label><input type="checkbox" id="groupNativePreview" /> Usar preview nativo</label></div>
+            <div class="field inline"><label><input type="checkbox" id="groupPreserveImage" /> Preservar imagem da mensagem</label></div>
+            <div class="actions">
+              <button type="submit" class="primary">Salvar partição</button>
+              <button type="button" id="groupReset">Limpar</button>
+            </div>
+          </form>
+          <div id="groupList" class="list"></div>
+        </section>
+
+        <section class="card wide">
+          <h2>Automações Copy Promo</h2>
+          <form id="configForm">
+            <input type="hidden" id="configId" />
+            <div class="triple">
+              <div class="field"><label>Nome</label><input id="configName" /></div>
+              <div class="field"><label>Grupo de origem</label><select id="configSource"></select></div>
+              <div class="field"><label>Partição de destino</label><select id="configTarget"></select></div>
+            </div>
+            <div class="field inline"><label><input type="checkbox" id="configActive" /> Automação ativa</label></div>
+            <div class="actions">
+              <button type="submit" class="primary">Salvar automação</button>
+              <button type="button" id="configReset">Limpar</button>
+            </div>
+          </form>
+          <div id="configList" class="list"></div>
+        </section>
+
+        <section class="card wide">
+          <h2>Teste e Logs</h2>
+          <form id="testForm">
+            <div class="triple">
+              <div class="field"><label>Automação</label><select id="testConfigId"></select></div>
+              <div class="field"><label>Mensagem</label><textarea id="testMessage" rows="4" placeholder="Cole aqui uma promoção com links"></textarea></div>
+              <div class="field"><label>Imagem (URL ou data URL)</label><input id="testImageUrl" /></div>
+            </div>
+            <div class="actions">
+              <button type="submit" class="primary">Executar teste</button>
+            </div>
+          </form>
+          <pre id="testResult" class="logbox"></pre>
+          <div id="logList" class="list"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
