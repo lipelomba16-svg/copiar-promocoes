@@ -15,10 +15,15 @@ const emptyForm = {
 };
 
 function statusColor(status = '') {
-  if (status === 'success') return 'text-emerald-300';
+  if (status === 'success' || status === 'ok' || status === 'sent') return 'text-emerald-300';
   if (status === 'skipped') return 'text-amber-300';
-  if (status === 'error') return 'text-red-300';
+  if (status === 'error' || status === 'failed') return 'text-red-300';
   return 'text-gray-400';
+}
+
+function formatDate(value) {
+  if (!value) return '';
+  try { return new Date(value).toLocaleString('pt-BR'); } catch { return String(value); }
 }
 
 export default function CopyPromo({ user }: { user: any }) {
@@ -37,6 +42,8 @@ export default function CopyPromo({ user }: { user: any }) {
   const [previewBridge, setPreviewBridge] = useState<any>({ status: 'disconnected', qrCodeUrl: null, logs: [] });
   const [previewBridgeBusy, setPreviewBridgeBusy] = useState(false);
   const [previewPhoneNumber, setPreviewPhoneNumber] = useState('');
+  const [manualSource, setManualSource] = useState('');
+  const [manualSourceError, setManualSourceError] = useState('');
 
   const showMsg = (type: 'success' | 'error', text: string) => {
     setMsg({ type, text });
@@ -148,6 +155,24 @@ export default function CopyPromo({ user }: { user: any }) {
   }, [groups, targetSearch]);
 
   const selectedSource = realGroups.find(g => g.id === form.sourceGroupId);
+
+  const addManualSource = () => {
+    const value = manualSource.trim();
+    setManualSourceError('');
+    if (!value) return;
+    if (!value.endsWith('@g.us') && !value.endsWith('@newsletter')) {
+      setManualSourceError('Informe um JID válido, ex.: 120207xxx@g.us ou 120207xxx@newsletter. Links de convite/canal precisam ser resolvidos pela conexão do WhatsApp.');
+      return;
+    }
+    if (realGroups.some(g => g.id === value)) {
+      setForm((f) => ({ ...f, sourceGroupId: value, sourceGroupName: value }));
+      return;
+    }
+    const manual = { id: value, name: value, type: value.endsWith('@newsletter') ? 'newsletter' : 'group', manual: true };
+    setRealGroups((list) => [...list, manual]);
+    setForm((f) => ({ ...f, sourceGroupId: value, sourceGroupName: value }));
+    setManualSource('');
+  };
 
   const openNew = () => {
     setEditingId(null);
@@ -310,6 +335,12 @@ export default function CopyPromo({ user }: { user: any }) {
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
                 <input value={sourceSearch} onChange={e => setSourceSearch(e.target.value)} placeholder="Pesquisar grupos, comunidades ou canais..." className="w-full bg-black/40 border border-white/5 rounded-xl py-2 pl-9 pr-4 text-xs text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-purple-500/50" />
                 </div>
+                <div className="space-y-2">
+                  <input value={manualSource} onChange={e => setManualSource(e.target.value)} placeholder="Cadastrar origem manualmente: JID ex.: 120207xxx@g.us ou ...@newsletter" className="w-full bg-black/40 border border-white/5 rounded-xl py-2 px-3 text-xs text-white placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-purple-500/50" />
+                  {manualSourceError && <div className="text-[11px] text-red-300">{manualSourceError}</div>}
+                  <button onClick={addManualSource} className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-bold">Cadastrar origem manualmente</button>
+                  <p className="text-[11px] text-gray-500">Se a listagem automática falhar (canais nem sempre são listados pelo Baileys), cadastre o JID aqui. Links de convite/canal (chat.whatsapp.com / whatsapp.com/channel) não viram origem sozinhos: o JID precisa ser resolvido pela conexão.</p>
+                </div>
                 <div className="bg-black/40 border border-white/10 rounded-2xl p-4 max-h-[220px] overflow-y-auto custom-scrollbar space-y-2">
                   {filteredSourceGroups.length === 0 && <div className="text-gray-600 text-xs text-center py-4">Conecte o WhatsApp ou sincronize os grupos.</div>}
                   {filteredSourceGroups.map(g => {
@@ -394,6 +425,8 @@ export default function CopyPromo({ user }: { user: any }) {
                   <div className="text-white font-bold truncate">{cfg.name || 'Copiar Promo'}</div>
                   <div className="text-xs text-gray-500 truncate">{cfg.sourceGroupName || cfg.sourceGroupId || 'Origem nao definida'} → {targetName}</div>
                   <div className="text-[10px] text-gray-600">{cfg.targetGroupId?.useNativeLinkPreview ? (cfg.targetGroupId?.preserveSourceImageInNativePreview ? 'Preview nativo · imagem original' : 'Preview nativo') : 'Envio com foto'}</div>
+                  {cfg.lastRunAt && <div className="text-[10px] text-gray-600">Última execução: {formatDate(cfg.lastRunAt)}</div>}
+                  {cfg.lastError && <div className="text-[11px] text-red-300 break-words">Último erro: {cfg.lastError}</div>}
                 </div>
                 <button onClick={() => toggleActive(cfg)} className={`px-3 py-1.5 rounded-xl text-[11px] font-bold border ${cfg.isActive ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300' : 'bg-white/5 border-white/10 text-gray-400'}`}>
                   {cfg.isActive ? 'Ativa' : 'Inativa'}
@@ -427,9 +460,13 @@ export default function CopyPromo({ user }: { user: any }) {
             {logs.length === 0 && <div className="text-gray-600 text-sm">Nenhuma promocao copiada ainda.</div>}
             {logs.map(log => (
               <div key={log._id} className="flex items-start justify-between gap-4 bg-black/30 border border-white/5 rounded-xl p-3 min-w-0 overflow-hidden">
-                <div className="min-w-0 flex-1 overflow-hidden">
+                <div className="min-w-0 flex-1 overflow-hidden space-y-1">
                   <div className="text-sm text-white font-semibold truncate">{log.productName || log.originalUrl || 'Promocao'}</div>
-                  <div className="text-[11px] leading-4 text-gray-500 break-all whitespace-normal max-h-8 overflow-hidden pr-2">{log.provider} · {log.status} · {log.error || log.price || ''}</div>
+                  <div className="text-[11px] leading-4 text-gray-500 break-all whitespace-normal pr-2">{log.provider} · {log.status}{log.price ? ` · ${log.price}` : ''}{log.coupon ? ` · cupom ${log.coupon}` : ''}</div>
+                  {log.originalUrl && <div className="text-[11px] text-gray-500 break-all">Original: {log.originalUrl}</div>}
+                  {log.affiliateUrl && <div className="text-[11px] text-emerald-300/80 break-all">Afiliado: {log.affiliateUrl}</div>}
+                  {log.messagePreview && <div className="text-[11px] text-gray-400 break-words whitespace-pre-wrap max-h-16 overflow-hidden">{log.messagePreview}</div>}
+                  {log.error && <div className="text-[11px] text-red-300 break-words">Erro: {log.error}</div>}
                 </div>
                 <div className={`shrink-0 ${log.status === 'sent' ? 'text-emerald-300' : log.status === 'skipped' ? 'text-amber-300' : 'text-red-300'}`}> 
                   {log.status === 'sent' ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}

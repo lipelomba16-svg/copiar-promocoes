@@ -6,6 +6,7 @@ import { getMongoStatus, reconnectMongoFromSettings, saveMongoSettings, testMong
 import { copyPromoService } from './src/services/copyPromoService.js';
 import { providerService } from './src/services/providerService.js';
 import { whatsappService } from './src/services/whatsappService.js';
+import { assignProvidersToItems, getAutoSearchDiagnostics, interleaveProviders, providerRegistry, validateAutoSearchConfig } from './src/services/autoSearch.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +30,8 @@ app.get('/api/bootstrap', async (_req, res) => {
   const state = await initializeStore();
   const safeSettings = {
     ...state.settings,
+    // Credenciais mascaradas: segredos nunca voltam completos.
+    providers: await providerService.getMaskedProviders(),
     security: { encryptionKey: 'stored-locally-hidden' }
   };
   res.json({
@@ -84,6 +87,39 @@ app.post('/api/providers/:provider', async (req, res) => {
 
 app.get('/api/whatsapp/status', async (_req, res) => {
   res.json(await whatsappService.getStatus());
+});
+
+app.post('/api/whatsapp/manual-source', async (req, res) => {
+  try {
+    const entry = whatsappService.addManualSource(String(req.body?.jid || req.body?.sourceGroupId || ''), String(req.body?.name || ''));
+    res.json({ ok: true, entry, groups: await whatsappService.getStatus().then((status) => status.groups) });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || String(error) });
+  }
+});
+
+app.get('/api/whatsapp/newsletters', async (_req, res) => {
+  res.json({ newsletters: await whatsappService.discoverNewsletters() });
+});
+
+app.get('/api/auto-search/diagnostics', async (_req, res) => {
+  const state = await initializeStore();
+  res.json({ providers: getAutoSearchDiagnostics(state), registry: providerRegistry });
+});
+
+app.post('/api/auto-search/assign', async (req, res) => {
+  const body = req.body || {};
+  const validation = validateAutoSearchConfig(body);
+  if (!validation.ok) {
+    res.status(400).json({ ok: false, errors: validation.errors });
+    return;
+  }
+  const items = Array.isArray(body.items) ? body.items : [];
+  res.json({
+    ok: true,
+    sequence: interleaveProviders(validation.normalized.providersEnabled, items.length),
+    assigned: assignProvidersToItems(items, validation.normalized.providersEnabled)
+  });
 });
 
 app.post('/api/whatsapp/connect', async (_req, res) => {
@@ -148,6 +184,30 @@ app.delete('/api/groups/:id', async (req, res) => {
 
 app.get('/api/copy-promo/configs', async (_req, res) => {
   res.json(await copyPromoService.listConfigs());
+});
+
+// Rota singular exigida pela especificação: lista, ou um só com ?id=.
+app.get('/api/copy-promo/config', async (req, res) => {
+  const id = typeof req.query.id === 'string' ? req.query.id : '';
+  if (id) {
+    const config = await copyPromoService.getConfig(id);
+    if (!config) {
+      res.status(404).json({ ok: false, error: 'Automação não encontrada.' });
+      return;
+    }
+    res.json(config);
+    return;
+  }
+  res.json(await copyPromoService.listConfigs());
+});
+
+app.get('/api/copy-promo/config/:id', async (req, res) => {
+  const config = await copyPromoService.getConfig(req.params.id);
+  if (!config) {
+    res.status(404).json({ ok: false, error: 'Automação não encontrada.' });
+    return;
+  }
+  res.json(config);
 });
 
 app.post('/api/copy-promo/config', async (req, res) => {

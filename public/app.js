@@ -21,15 +21,33 @@ function text(id, value) {
   document.getElementById(id).textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 }
 
+const SECRET_FIELDS = ['secret', 'cookies', 'cookie', 'csrfToken', 'appSecret'];
+
 function fillProviderForm(provider, values = {}) {
   const form = document.querySelector(`form[data-provider="${provider}"]`);
   if (!form) return;
   for (const [key, value] of Object.entries(values)) {
+    // Segredos vêm mascarados do backend e o campo em branco no save
+    // significa "manter a credencial salva": nunca preencher o input
+    // com a máscara, senão a máscara sobrescreveria o segredo real.
+    if (SECRET_FIELDS.includes(key)) continue;
     const input = form.querySelector(`[name="${key}"]`);
     if (!input) continue;
     if (input.type === 'checkbox') input.checked = !!value;
     else input.value = value ?? '';
   }
+}
+
+function renderProviderPreview(provider, values = {}) {
+  const el = document.getElementById(`provider-status-${provider}`);
+  if (!el || !values) return;
+  const preview = values.secretPreview || values.appSecretPreview || values.cookiesPreview || values.cookiePreview || '';
+  const cookieLength = values.cookiesLength ?? values.cookieLength ?? 0;
+  const parts = [];
+  if (preview) parts.push(`Salva: ${preview}`);
+  if (cookieLength) parts.push(`Cookie: ${cookieLength} caracteres`);
+  if (values.isActive === false) parts.push('Inativa');
+  el.textContent = parts.join(' · ') || 'Nenhuma credencial salva.';
 }
 
 function renderGroups(groups = []) {
@@ -62,7 +80,8 @@ function renderConfigs(configs = [], groups = []) {
             <strong>${config.name}</strong>
             <small>${config.sourceGroupName || config.sourceGroupId} -> ${target?.groupName || 'Sem destino'}</small>
             <small>Webhook: ${location.origin}/api/copy-promo/webhook/${config.webhookToken}</small>
-            <small>Status: ${config.lastStatus || 'idle'} | Enviadas: ${config.sentCount || 0} | Ignoradas: ${config.skippedCount || 0}</small>
+            <small>Status: ${config.lastStatus || 'idle'} | Enviadas: ${config.sentCount || 0} | Ignoradas: ${config.skippedCount || 0}${config.lastRunAt ? ` | Última: ${config.lastRunAt}` : ''}</small>
+            ${config.lastError ? `<small>Último erro: ${config.lastError}</small>` : ''}
           </div>
           <div class="actions">
             <button data-edit-config="${config.id}">Editar</button>
@@ -81,9 +100,11 @@ function renderLogs(logs = []) {
     <article class="item">
       <strong>${log.status || 'n/a'} · ${log.provider || 'unknown'}</strong>
       <small>${log.createdAt || ''}</small>
-      <small>${log.sourceGroupName || ''}</small>
+      <small>${log.sourceGroupName || ''}${log.price ? ` · ${log.price}` : ''}${log.coupon ? ` · cupom ${log.coupon}` : ''}</small>
+      ${log.originalUrl ? `<small>Original: ${log.originalUrl}</small>` : ''}
+      ${log.affiliateUrl ? `<small>Afiliado: ${log.affiliateUrl}</small>` : ''}
       <small>${log.messagePreview || ''}</small>
-      <small>${log.error || ''}</small>
+      ${log.error ? `<small>Erro: ${log.error}</small>` : ''}
     </article>
   `).join('');
 }
@@ -106,6 +127,9 @@ async function refreshBootstrap() {
   fillProviderForm('amazon', data.settings.providers.amazon);
   fillProviderForm('mercadolivre', data.settings.providers.mercadolivre);
   fillProviderForm('aliexpress', data.settings.providers.aliexpress);
+  for (const provider of ['shopee', 'amazon', 'mercadolivre', 'aliexpress']) {
+    renderProviderPreview(provider, data.settings.providers[provider]);
+  }
   renderGroups(data.groups);
   renderConfigs(data.copyPromoConfigs, data.groups);
   renderLogs(data.logs);
@@ -155,6 +179,29 @@ document.querySelector('[data-action="save-mongo"]').addEventListener('click', a
 document.querySelector('[data-action="wa-connect"]').addEventListener('click', async () => { await api('/api/whatsapp/connect', { method: 'POST' }); await refreshBootstrap(); });
 document.querySelector('[data-action="wa-pair"]').addEventListener('click', async () => { await api('/api/whatsapp/pair', { method: 'POST', body: JSON.stringify({ phoneNumber: document.getElementById('waPhone').value }) }); await refreshBootstrap(); });
 document.querySelector('[data-action="wa-refresh"]').addEventListener('click', async () => { await api('/api/whatsapp/groups/refresh', { method: 'POST' }); await refreshBootstrap(); });
+document.querySelector('[data-action="wa-manual-source"]').addEventListener('click', async () => {
+  const jid = document.getElementById('manualSourceJid').value.trim();
+  if (!jid) return;
+  try {
+    const result = await api('/api/whatsapp/manual-source', { method: 'POST', body: JSON.stringify({ jid }) });
+    document.getElementById('manualSourceJid').value = '';
+    await refreshBootstrap();
+    const select = document.getElementById('configSource');
+    select.value = result.entry.id;
+  } catch (error) {
+    text('manualSourceStatus', error.message);
+  }
+});
+
+document.querySelector('[data-action="auto-search-diag"]').addEventListener('click', async () => {
+  try {
+    const result = await api('/api/auto-search/diagnostics');
+    text('autoSearchDiagnostics', result);
+  } catch (error) {
+    text('autoSearchDiagnostics', error.message);
+  }
+});
+
 document.querySelector('[data-action="wa-disconnect"]').addEventListener('click', async () => { await api('/api/whatsapp/disconnect', { method: 'POST' }); await refreshBootstrap(); });
 
 document.querySelectorAll('[data-provider-test]').forEach((button) => {
@@ -218,7 +265,9 @@ document.getElementById('configForm').addEventListener('submit', async (event) =
   event.preventDefault();
   const sourceSelect = document.getElementById('configSource');
   const targetSelect = document.getElementById('configTarget');
-  const selectedSourceLabel = sourceSelect.options[sourceSelect.selectedIndex]?.textContent || '';
+  const selectedSourceId = sourceSelect.value;
+  const sourceEntry = (state.bootstrap?.whatsapp?.groups || []).find((group) => group.id === selectedSourceId);
+  const selectedSourceLabel = sourceEntry?.name || (sourceSelect.options[sourceSelect.selectedIndex]?.textContent || '').replace(/\s*\([^)]*\)\s*$/, '');
   const payload = {
     id: document.getElementById('configId').value,
     name: document.getElementById('configName').value,
