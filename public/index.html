@@ -138,13 +138,28 @@
               <div class="field"><label>Grupo de origem</label><select id="configSource"></select></div>
               <div class="field"><label>Partição de destino</label><select id="configTarget"></select></div>
             </div>
-            <div class="field inline"><label><input type="checkbox" id="configActive" /> Automação ativa</label></div>
+            <div class="field"><label>Origem manual (JID) — quando a listagem automática falhar</label><input id="manualSourceJid" placeholder="120207xxx@g.us ou 120207xxx@newsletter" /></div>
+          <p class="hint">Canais (@newsletter) nem sempre são listados pelo Baileys. Cadastre o JID aqui; links de convite/canal (chat.whatsapp.com / whatsapp.com/channel) não viram origem sozinhos.</p>
+          <div class="actions">
+            <button type="button" data-action="wa-manual-source">Cadastrar origem manualmente</button>
+          </div>
+          <pre id="manualSourceStatus" class="logbox"></pre>
+          <div class="field inline"><label><input type="checkbox" id="configActive" /> Automação ativa</label></div>
             <div class="actions">
               <button type="submit" class="primary">Salvar automação</button>
               <button type="button" id="configReset">Limpar</button>
             </div>
           </form>
           <div id="configList" class="list"></div>
+        </section>
+
+        <section class="card wide">
+          <h2>Busca Automática / Compare — Provedores</h2>
+          <p class="hint">Um único fluxo para Shopee, Mercado Livre, AliExpress e Amazon, com rodízio 1 de cada (nessa ordem) entre os habilitados. O diagnóstico usa as credenciais salvas neste app; a Amazon só fica pronta com cookie.</p>
+          <div class="actions">
+            <button type="button" data-action="auto-search-diag">Ver diagnóstico dos 4 provedores</button>
+          </div>
+          <pre id="autoSearchDiagnostics" class="logbox"></pre>
         </section>
 
         <section class="card wide">

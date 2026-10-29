@@ -3,62 +3,94 @@ import { getState, saveState } from '../lib/store.js';
 import { providerService } from './providerService.js';
 import { whatsappService } from './whatsappService.js';
 import { reconnectMongoFromSettings } from '../lib/mongoBridge.js';
+import {
+  applyShopeeCouponNote,
+  buildFinalCaption,
+  cleanCopiedCaption,
+  extractProductInfo,
+  extractUrls,
+  isGroupOrNewsletterJid,
+  providerFromUrl
+} from '../lib/promoText.js';
 
 const allowedProviders = ['mercadolivre', 'amazon', 'shopee', 'aliexpress'];
 
-function extractUrls(text) {
-  return Array.from(new Set((String(text || '').match(/https?:\/\/[^\s<>"')]+/gi) || []).map((value) => value.replace(/[),.;]+$/, ''))));
+// Deduplicação em memória por (configId, rawMessageId): o mesmo
+// WhatsApp/webhook pode redeliverar a mensagem. Sem messageId, não há
+// dedupe (testes manuais e webhooks sem id continuam funcionando).
+const seenMessageIds = new Set();
+function isDuplicate(configId, messageId) {
+  if (!messageId) return false;
+  const key = `${configId}:${messageId}`;
+  if (seenMessageIds.has(key)) return true;
+  seenMessageIds.add(key);
+  if (seenMessageIds.size > 2000) {
+    const first = seenMessageIds.values().next().value;
+    seenMessageIds.delete(first);
+  }
+  return false;
 }
 
 function normalizeText(payload) {
+  const message = payload?.message || payload?.data?.message || payload?.body?.message || {};
   return String(
     payload?.texto ||
     payload?.caption ||
     payload?.text ||
     payload?.message ||
+    message?.conversation ||
+    message?.extendedTextMessage?.text ||
+    message?.imageMessage?.caption ||
     payload?.body?.text ||
     payload?.body?.caption ||
     payload?.body?.message ||
+    payload?.data?.text ||
+    payload?.data?.caption ||
     ''
   ).trim();
 }
 
 function normalizeSource(payload) {
+  const key = payload?.key || payload?.message?.key || {};
+  const message = payload?.message || payload?.data?.message || {};
   return {
-    sourceGroupId: String(payload?.sourceGroupId || payload?.groupId || payload?.remoteJid || payload?.body?.sourceGroupId || '').trim(),
+    sourceGroupId: String(
+      payload?.sourceGroupId || payload?.groupId || payload?.remoteJid || payload?.chatId ||
+      key?.remoteJid || payload?.body?.sourceGroupId || payload?.data?.remoteJid || ''
+    ).trim(),
     sourceGroupName: String(payload?.sourceGroupName || payload?.groupName || payload?.body?.sourceGroupName || '').trim(),
-    messageId: String(payload?.messageId || payload?.body?.messageId || '').trim()
+    messageId: String(payload?.messageId || payload?.id || payload?.body?.messageId || key?.id || '').trim(),
+    fromMe: Boolean(payload?.fromMe ?? key?.fromMe ?? false)
   };
 }
 
 function normalizeImageUrl(payload) {
-  return String(payload?.imageUrl || payload?.image_url || payload?.body?.imageUrl || '').trim();
+  const message = payload?.message || payload?.data?.message || payload?.body?.message || {};
+  const imageMessage = message?.imageMessage || {};
+  return String(
+    payload?.imageUrl || payload?.image_url || payload?.mediaUrl ||
+    imageMessage?.url || payload?.body?.imageUrl || payload?.data?.imageUrl || ''
+  ).trim();
 }
 
+// Cada entrada de lote é processada, não só a primeira.
+// Aceita: array direto, messages/items/events (raiz, data.* ou body.*),
+// objeto único ou data.* como mensagem única.
 function expandWebhookPayloads(payload) {
-  const batch = [payload?.messages, payload?.items, payload?.events, payload?.body?.messages].find(Array.isArray);
-  return Array.isArray(batch) && batch.length ? batch : [payload];
-}
-
-function providerFromUrl(url) {
-  if (/mercadolivre\.com|meli\.la/i.test(url)) return 'mercadolivre';
-  if (/amazon\.com|amazon\.com\.br|amzn\.to|a\.co/i.test(url)) return 'amazon';
-  if (/shopee\.com|shopee\.com\.br|s\.shopee\.com|shope\.ee/i.test(url)) return 'shopee';
-  if (/aliexpress\.com|ali\.pub|s\.click\.aliexpress/i.test(url)) return 'aliexpress';
-  return 'unknown';
-}
-
-function cleanCopiedCaption(text, sourceGroupName = '') {
-  const lines = String(text || '').split(/\r?\n/).map((line) => line.trimEnd());
-  return lines
-    .filter((line) => {
-      if (!line.trim()) return true;
-      const lower = line.toLowerCase();
-      if (sourceGroupName && lower.includes(String(sourceGroupName).toLowerCase())) return false;
-      return !/(grupo parceiro|canal parceiro|cupom nos comentarios|sigam|siga nosso)/i.test(lower);
-    })
-    .join('\n')
-    .trim();
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [payload];
+  const candidates = [
+    payload.messages, payload.items, payload.events,
+    payload.data?.messages, payload.data?.items, payload.data?.events,
+    payload.body?.messages, payload.body?.items, payload.body?.events
+  ];
+  const batch = candidates.find((value) => Array.isArray(value) && value.length > 0);
+  if (batch) return batch;
+  if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) {
+    const data = payload.data;
+    if (data.text || data.caption || data.message || data.imageUrl || data.remoteJid) return [data];
+  }
+  return [payload];
 }
 
 async function appendLog(entry) {
@@ -69,6 +101,15 @@ async function appendLog(entry) {
     ...entry
   });
   state.logs = state.logs.slice(-300);
+  await saveState(state);
+}
+
+async function updateConfigAfter(state, config, patch, increments) {
+  config.lastRunAt = new Date().toISOString();
+  Object.assign(config, patch);
+  config.copiedCount = Number(config.copiedCount || 0) + (increments.copiedCount || 0);
+  config.sentCount = Number(config.sentCount || 0) + (increments.sentCount || 0);
+  config.skippedCount = Number(config.skippedCount || 0) + (increments.skippedCount || 0);
   await saveState(state);
 }
 
@@ -85,6 +126,7 @@ export const copyPromoService = {
     await reconnectMongoFromSettings();
     return {
       ...state.settings,
+      providers: await providerService.getMaskedProviders(),
       security: { encryptionKey: 'stored-locally-hidden' }
     };
   },
@@ -133,31 +175,57 @@ export const copyPromoService = {
     }));
   },
 
+  async getConfig(id) {
+    const configs = await this.listConfigs();
+    return configs.find((config) => config.id === id) || null;
+  },
+
   async saveConfig(payload) {
     const state = await getState();
-    if (!payload.name) throw new Error('Nome da automacao obrigatorio.');
-    if (!payload.sourceGroupId) throw new Error('Grupo de origem obrigatorio.');
-    if (!payload.targetGroupId) throw new Error('Particao de destino obrigatoria.');
-    const next = {
-      id: payload.id || crypto.randomUUID(),
-      name: String(payload.name || '').trim(),
-      webhookToken: payload.webhookToken || crypto.randomUUID(),
-      sourceGroupId: String(payload.sourceGroupId || '').trim(),
-      sourceGroupName: String(payload.sourceGroupName || '').trim(),
-      targetGroupId: String(payload.targetGroupId || '').trim(),
-      isActive: !!payload.isActive,
-      copiedCount: Number(payload.copiedCount || 0),
-      sentCount: Number(payload.sentCount || 0),
-      skippedCount: Number(payload.skippedCount || 0),
-      lastStatus: payload.lastStatus || 'idle',
-      lastError: payload.lastError || '',
-      lastRunAt: payload.lastRunAt || '',
-      updatedAt: new Date().toISOString(),
-      createdAt: payload.createdAt || new Date().toISOString()
-    };
+    const existing = payload.id ? state.copyPromoConfigs.find((config) => config.id === payload.id) : null;
+    if (!payload.name && !existing) throw new Error('Nome da automacao obrigatorio.');
+    const sourceGroupId = String(payload.sourceGroupId ?? existing?.sourceGroupId ?? '').trim();
+    const targetGroupId = String(payload.targetGroupId ?? existing?.targetGroupId ?? '').trim();
+    if (!sourceGroupId) throw new Error('Grupo de origem obrigatorio.');
+    if (!isGroupOrNewsletterJid(sourceGroupId)) {
+      throw new Error('Origem inválida: esperado JID de grupo (@g.us) ou canal (@newsletter). Use o cadastro manual por JID quando a listagem automática falhar.');
+    }
+    if (!targetGroupId) throw new Error('Particao de destino obrigatoria.');
+    // Merge: NUNCA aceitar do cliente webhookToken, contadores,
+    // lastStatus/lastError/lastRunAt — edição/toggle não pode zerar
+    // contadores nem trocar o webhook sem querer.
+    const next = existing
+      ? {
+          ...existing,
+          name: String(payload.name ?? existing.name).trim(),
+          sourceGroupId,
+          sourceGroupName: String(payload.sourceGroupName ?? existing.sourceGroupName ?? '').trim(),
+          targetGroupId,
+          isActive: payload.isActive !== undefined ? !!payload.isActive : !!existing.isActive,
+          addShopeeCouponNote: payload.addShopeeCouponNote !== undefined ? !!payload.addShopeeCouponNote : (existing.addShopeeCouponNote !== false),
+          updatedAt: new Date().toISOString()
+        }
+      : {
+          id: crypto.randomUUID(),
+          name: String(payload.name || '').trim(),
+          webhookToken: crypto.randomUUID(),
+          sourceGroupId,
+          sourceGroupName: String(payload.sourceGroupName || '').trim(),
+          targetGroupId,
+          isActive: !!payload.isActive,
+          addShopeeCouponNote: payload.addShopeeCouponNote !== false,
+          copiedCount: 0,
+          sentCount: 0,
+          skippedCount: 0,
+          lastStatus: 'idle',
+          lastError: '',
+          lastRunAt: '',
+          updatedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString()
+        };
     state.copyPromoConfigs = state.copyPromoConfigs.filter((config) => config.id !== next.id).concat(next);
     await saveState(state);
-    return next;
+    return { ...next, webhookPath: `/api/copy-promo/webhook/${next.webhookToken}` };
   },
 
   async deleteConfig(id) {
@@ -174,7 +242,7 @@ export const copyPromoService = {
     config.webhookToken = crypto.randomUUID();
     config.updatedAt = new Date().toISOString();
     await saveState(state);
-    return config;
+    return { ...config, webhookPath: `/api/copy-promo/webhook/${config.webhookToken}` };
   },
 
   async getLogs(limit = 100) {
@@ -199,11 +267,18 @@ export const copyPromoService = {
     if (!config || !config.isActive) return { success: false, skipped: true, reason: 'copy_promo_inactive_or_invalid_token' };
     const results = [];
     for (const item of expandWebhookPayloads(payload)) {
-      results.push(await this.processConfig(config.id, item));
+      try {
+        results.push(await this.processConfig(config.id, item));
+      } catch (error) {
+        results.push({ success: false, sent: 0, error: error.message || String(error) });
+      }
     }
     return {
       success: results.some((result) => result.success),
+      processed: results.length,
       sent: results.reduce((sum, result) => sum + Number(result.sent || 0), 0),
+      skipped: results.filter((result) => result.skipped).length,
+      failed: results.filter((result) => !result.success && !result.skipped).length,
       results
     };
   },
@@ -214,42 +289,97 @@ export const copyPromoService = {
     if (!config) throw new Error('Config inexistente.');
     const targetGroup = state.groups.find((group) => group.id === config.targetGroupId && group.isActive);
     if (!targetGroup) throw new Error('Particao de destino nao encontrada.');
-    const { sourceGroupId, sourceGroupName, messageId } = normalizeSource(payload);
-    if (config.sourceGroupId && config.sourceGroupId !== sourceGroupId) {
+    const { sourceGroupId, sourceGroupName, messageId, fromMe } = normalizeSource(payload);
+    if (fromMe) return { success: true, skipped: true, reason: 'own_message' };
+    if (config.sourceGroupId && sourceGroupId && config.sourceGroupId !== sourceGroupId) {
       return { success: true, skipped: true, reason: 'source_group_mismatch' };
+    }
+    if (messageId && isDuplicate(config.id, messageId)) {
+      return { success: true, skipped: true, reason: 'duplicate' };
     }
 
     const text = normalizeText(payload);
     const orderedUrls = extractUrls(text);
     const allowedUrls = orderedUrls.filter((url) => allowedProviders.includes(providerFromUrl(url)));
+    const effectiveSourceGroupId = sourceGroupId || config.sourceGroupId;
+    const effectiveSourceGroupName = sourceGroupName || config.sourceGroupName;
+    const baseLog = {
+      configId,
+      sourceGroupId: effectiveSourceGroupId,
+      sourceGroupName: effectiveSourceGroupName,
+      targetGroupId: targetGroup.id,
+      rawMessageId: messageId,
+      originalUrl: allowedUrls[0] || '',
+      originalUrls: allowedUrls
+    };
+
     if (!allowedUrls.length) {
       await appendLog({
-        configId,
-        sourceGroupId,
-        sourceGroupName,
+        ...baseLog,
+        provider: 'unknown',
         status: 'skipped',
         error: 'no_allowed_provider_url',
         messagePreview: text.slice(0, 300)
       });
+      await updateConfigAfter(state, config, { lastStatus: 'skipped', lastError: '' }, { skippedCount: 1 });
       return { success: true, skipped: true, reason: 'no_allowed_provider_url' };
     }
 
-    let message = text;
-    let primaryAffiliateUrl = '';
-    let primaryProvider = providerFromUrl(allowedUrls[0]);
-    let previewImage = normalizeImageUrl(payload);
+    const firstProvider = providerFromUrl(allowedUrls[0]);
+    let providerImageUrl = '';
+    // Converter TODOS os links permitidos, individualmente. Se qualquer
+    // conversão falhar, registrar failed e NÃO enviar (nunca link comum).
+    const affiliateByOriginal = new Map();
+    const affiliateUrls = [];
+    let failedConversion = null;
     for (const url of allowedUrls) {
-      const affiliate = await providerService.affiliateForUrl(url);
-      message = message.replaceAll(url, affiliate.affiliateUrl);
-      if (!primaryAffiliateUrl) primaryAffiliateUrl = affiliate.affiliateUrl;
-      if (affiliate.imageUrl && !previewImage) previewImage = affiliate.imageUrl;
-      if (affiliate.productName) primaryProvider = affiliate.provider;
+      try {
+        const affiliate = await providerService.affiliateForUrl(url);
+        affiliateByOriginal.set(url, affiliate.affiliateUrl);
+        affiliateUrls.push(affiliate.affiliateUrl);
+        if (affiliate.productName) baseLog.productName = affiliate.productName;
+        if (affiliate.imageUrl) providerImageUrl = affiliate.imageUrl;
+      } catch (error) {
+        failedConversion = { provider: providerFromUrl(url), originalUrl: url, error: error.message || String(error) };
+        break;
+      }
     }
-    message = cleanCopiedCaption(message, sourceGroupName || config.sourceGroupName);
+    if (failedConversion) {
+      const info = extractProductInfo(text);
+      await appendLog({
+        ...baseLog,
+        provider: failedConversion.provider,
+        originalUrl: failedConversion.originalUrl,
+        status: 'failed',
+        error: failedConversion.error,
+        messagePreview: text.slice(0, 300),
+        ...info
+      });
+      await updateConfigAfter(state, config, { lastStatus: 'error', lastError: failedConversion.error }, {});
+      return { success: false, sent: 0, provider: failedConversion.provider, error: failedConversion.error };
+    }
+
+    const built = buildFinalCaption(text, affiliateByOriginal, effectiveSourceGroupName);
+    if (built.affiliateUrlsInCaption.length === 0) {
+      await appendLog({
+        ...baseLog,
+        provider: firstProvider,
+        status: 'skipped',
+        error: 'no_valid_affiliate_link_in_final_message',
+        messagePreview: built.caption.slice(0, 300)
+      });
+      await updateConfigAfter(state, config, { lastStatus: 'skipped', lastError: '' }, { skippedCount: 1 });
+      return { success: true, skipped: true, reason: 'no_valid_affiliate_link_in_final_message' };
+    }
+
+    let message = applyShopeeCouponNote(built.caption, firstProvider, config.addShopeeCouponNote !== false);
+    let previewImage = normalizeImageUrl(payload) || providerImageUrl || '';
+    const info = extractProductInfo(message);
 
     const destinations = Array.from(new Set((targetGroup.groupIdentifiers || [targetGroup.groupIdentifier]).filter(Boolean)));
     let sent = 0;
     let lastError = '';
+    const failedDestinations = [];
     for (const jid of destinations) {
       try {
         await whatsappService.sendMessage(jid, message, targetGroup.useNativeLinkPreview ? '' : previewImage, {
@@ -258,34 +388,31 @@ export const copyPromoService = {
         sent++;
       } catch (error) {
         lastError = error.message || String(error);
+        failedDestinations.push(`${jid}: ${lastError}`);
       }
     }
 
-    config.lastRunAt = new Date().toISOString();
-    config.lastStatus = sent > 0 ? 'success' : 'error';
-    config.lastError = sent > 0 ? '' : lastError;
-    if (sent > 0) {
-      config.copiedCount += 1;
-      config.sentCount += 1;
-    } else {
-      config.skippedCount += 1;
-    }
-    await saveState(state);
+    const partiallyFailed = sent > 0 && failedDestinations.length > 0;
+    await updateConfigAfter(
+      state,
+      config,
+      { lastStatus: sent > 0 ? 'success' : 'error', lastError: sent > 0 ? '' : lastError },
+      sent > 0 ? { copiedCount: 1, sentCount: 1 } : { skippedCount: 1 }
+    );
 
     await appendLog({
-      configId,
-      sourceGroupId,
-      sourceGroupName,
-      targetGroupId: targetGroup.id,
-      provider: primaryProvider,
-      originalUrl: allowedUrls[0],
-      affiliateUrl: primaryAffiliateUrl,
-      rawMessageId: messageId,
-      imageUrl: previewImage,
+      ...baseLog,
+      provider: firstProvider,
+      affiliateUrl: affiliateUrls[0] || '',
+      affiliateUrls,
+      imageUrl: previewImage || undefined,
       status: sent > 0 ? 'sent' : 'failed',
-      error: sent > 0 ? '' : lastError,
-      messagePreview: message.slice(0, 300)
+      error: sent > 0 ? (partiallyFailed ? `Envio parcial: ${failedDestinations.join('; ')}` : '') : lastError,
+      messagePreview: message.slice(0, 300),
+      ...info
     });
-    return { success: sent > 0, sent, provider: primaryProvider };
+    return { success: sent > 0, sent, provider: firstProvider };
   }
 };
+
+export { buildFinalCaption, cleanCopiedCaption, extractProductInfo, extractUrls, providerFromUrl, expandWebhookPayloads };
